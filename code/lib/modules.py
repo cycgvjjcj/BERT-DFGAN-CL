@@ -153,7 +153,7 @@ def sample(dataloader, netG, text_encoder, save_dir, device, multi_gpus, z_dim, 
         ######################################################
         # (1) Prepare_data
         ######################################################
-        imgs, sent_emb, words_embs, keys = prepare_data(data, text_encoder)
+        imgs,_, sent_emb,_, words_embs,_, keys,_,_= prepare_data(data, text_encoder)
         sent_emb = sent_emb.to(device)
         ######################################################
         # (2) Generate fake images
@@ -210,7 +210,8 @@ def calculate_fid(dataloader, text_encoder, netG, device, m1, s1, epoch, max_epo
         transforms.Normalize((-1, -1, -1), (2, 2, 2)),
         transforms.Resize((299, 299)),
         ])
-    n_gpu = dist.get_world_size()
+    # n_gpu = dist.get_world_size()
+    n_gpu = 1
     dl_length = dataloader.__len__()
     imgs_num = dl_length * n_gpu * batch_size * times
     pred_arr = np.empty((imgs_num, dims))
@@ -225,7 +226,7 @@ def calculate_fid(dataloader, text_encoder, netG, device, m1, s1, epoch, max_epo
             ######################################################
             # (1) Prepare_data
             ######################################################
-            imgs, sent_emb, words_embs, keys = prepare_data(data, text_encoder)
+            imgs,_, sent_emb,_, words_embs,_, keys,_,_ = prepare_data(data, text_encoder)
             sent_emb = sent_emb.to(device)
             ######################################################
             # (2) Generate fake images
@@ -244,10 +245,10 @@ def calculate_fid(dataloader, text_encoder, netG, device, m1, s1, epoch, max_epo
                 if pred.shape[2] != 1 or pred.shape[3] != 1:
                     pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
                 # concat pred from multi GPUs
-                output = list(torch.empty_like(pred) for _ in range(n_gpu))
-                dist.all_gather(output, pred)
-                pred_all = torch.cat(output, dim=0).squeeze(-1).squeeze(-1)
-                pred_arr[start:end] = pred_all.cpu().data.numpy()
+                # output = list(torch.empty_like(pred) for _ in range(n_gpu))
+                # dist.all_gather(output, pred)
+                # pred_all = torch.cat(output, dim=0).squeeze(-1).squeeze(-1)
+                # pred_arr[start:end] = pred_all.cpu().data.numpy()
             # update loop information
             if (n_gpu!=1) and (get_rank() != 0):
                 None
@@ -279,7 +280,8 @@ def eval(dataloader, text_encoder, netG, device, m1, s1, save_imgs, save_dir,
         transforms.Normalize((-1, -1, -1), (2, 2, 2)),
         transforms.Resize((299, 299)),
         ])
-    n_gpu = dist.get_world_size()
+    # n_gpu = dist.get_world_size()
+    n_gpu = 1
     dl_length = dataloader.__len__()
 
     imgs_num = dl_length * n_gpu * batch_size * times
@@ -295,7 +297,7 @@ def eval(dataloader, text_encoder, netG, device, m1, s1, save_imgs, save_dir,
             ######################################################
             # (1) Prepare_data
             ######################################################
-            imgs, sent_emb, words_embs, keys = prepare_data(data, text_encoder)
+            imgs,_, sent_emb,_, words_embs,_, keys,_,_= prepare_data(data, text_encoder)
             sent_emb = sent_emb.to(device)
             ######################################################
             # (2) Generate fake images
@@ -316,10 +318,10 @@ def eval(dataloader, text_encoder, netG, device, m1, s1, save_imgs, save_dir,
                 if pred.shape[2] != 1 or pred.shape[3] != 1:
                     pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
                 # concat pred from multi GPUs
-                output = list(torch.empty_like(pred) for _ in range(n_gpu))
-                dist.all_gather(output, pred)
-                pred_all = torch.cat(output, dim=0).squeeze(-1).squeeze(-1)
-                pred_arr[start:end] = pred_all.cpu().data.numpy()
+                # output = list(torch.empty_like(pred) for _ in range(n_gpu))
+                # dist.all_gather(output, pred)
+                # pred_all = torch.cat(output, dim=0).squeeze(-1).squeeze(-1)
+                # pred_arr[start:end] = pred_all.cpu().data.numpy()
             # update loop information
             if (n_gpu!=1) and (get_rank() != 0):
                 None
