@@ -24,7 +24,9 @@ from lib.utils import mkdir_p, get_rank
 from lib.datasets import TextImgDataset as Dataset
 from lib.datasets import prepare_data, encode_tokens
 from models.inception import InceptionV3
-
+from pretrain_DAMSM_config import cfg, cfg_from_file
+from GlobalAttention import func_attention
+from utils import cosine_similarity
 from torch.nn.functional import adaptive_avg_pool2d
 import torch.distributed as dist
 from lib.masks import mask_correlated_samples
@@ -60,6 +62,7 @@ def train(dataloader, netG, netD, netC, text_encoder,image_encoder, optimizerG, 
         loop = tqdm(total=len(dataloader))
     for step, data in enumerate(dataloader, 0):
         # prepare_data
+        #加个分支
         imgs,imgs_2, sent_emb,sent_emb_2, words_embs,words_embs_2, keys ,sort_ind, sort_ind_2= prepare_data(data, text_encoder)
         imgs = imgs.to(device).requires_grad_()
         sent_emb = sent_emb.to(device).requires_grad_()
@@ -80,6 +83,8 @@ def train(dataloader, netG, netD, netC, text_encoder,image_encoder, optimizerG, 
         real_features_2 = netD(imgs_2)
         pred_real_2, errD_real_2 = predict_loss(netC, real_features_2, sent_emb_2, negtive=False)
         mis_features_2 = torch.cat((real_features_2[1:], real_features_2[0:1]), dim=0)
+
+        #BERT-DFGAN-CL改造：errD_mis_2貌似是这次改造加的
         _, errD_mis_2 = predict_loss(netC, mis_features_2, sent_emb_2, negtive=True)
 
         # synthesize fake images
@@ -117,7 +122,7 @@ def train(dataloader, netG, netD, netC, text_encoder,image_encoder, optimizerG, 
         errG_2 = -output_2.mean()
         errG += errG_2
 
-        #contra_loss
+        #BERT-DFGAN-CL改造：contra_loss
         total_contra_loss = 0
         _, ori_indices = torch.sort(sort_ind, 0)
         _, ori_indices_2 = torch.sort(sort_ind_2, 0)
@@ -153,6 +158,7 @@ def sample(dataloader, netG, text_encoder, save_dir, device, multi_gpus, z_dim, 
         ######################################################
         # (1) Prepare_data
         ######################################################
+        #这些变量为什么注释呢？
         imgs,_, sent_emb,_, words_embs,_, keys,_,_= prepare_data(data, text_encoder)
         sent_emb = sent_emb.to(device)
         ######################################################
@@ -428,6 +434,7 @@ def MA_GP(img, sent, out):
 
 
 def predict_loss(predictor, img_feature, text_feature, negtive):
+    #代码去哪了？找不到predictor的实现
     output = predictor(img_feature, text_feature)
     err = hinge_loss(output, negtive)
     return output,err
@@ -452,4 +459,127 @@ def logit_loss(output, negtive):
         err = nn.BCELoss()(output, fake_labels)
     return err
 
+#对应from miscc.losses import sent_loss, words_loss
+def sent_loss(cnn_code, rnn_code, labels, class_ids,
+              batch_size, eps=1e-8):
+    # ### Mask mis-match samples  ###
+    # that come from the same class as the real sample ###
+    masks = []
+    if class_ids is not None:
+        for i in range(batch_size):
+            mask = (class_ids == class_ids[i]).astype(np.uint8)
+            mask[i] = 0
+            masks.append(mask.reshape((1, -1)))
+        # np.concatenate 拼接数组
+        masks = np.concatenate(masks, 0)
+        # masks: batch_size x batch_size
+        # masks = torch.ByteTensor(masks)
+        masks = torch.BoolTensor(masks)
+        if cfg.CUDA:
+            masks = masks.cuda()
 
+    # --> seq_len x batch_size x nef
+    if cnn_code.dim() == 2:
+        # unsqueeze 升维，squeeze 降维
+        cnn_code = cnn_code.unsqueeze(0)
+        rnn_code = rnn_code.unsqueeze(0)
+
+    # cnn_code_norm / rnn_code_norm: seq_len x batch_size x 1
+    # torch.norm是对输入的Tensor求范数。dim=2代表从2维度计算范数，0列1行
+    # ，2， 代表2范数，，它返回特征值向量：谱范数，即A’A矩阵的最大特征值的开平方
+    cnn_code_norm = torch.norm(cnn_code, 2, dim=2, keepdim=True)
+    rnn_code_norm = torch.norm(rnn_code, 2, dim=2, keepdim=True)
+    # scores* / norm*: seq_len x batch_size x batch_size
+    # bmm 计算两个tensor的矩阵乘法，torch.bmm(a,b),tensor a 的size为(b,h,w),tensor b的size为(b,w,m) 也就是说两个tensor的第一维是相等的，然后第一个数组的第三维和第二个数组的第二维度要求一样，对于剩下的则不做要求，输出维度 （b,h,m）
+    scores0 = torch.bmm(cnn_code, rnn_code.transpose(1, 2))
+    norm0 = torch.bmm(cnn_code_norm, rnn_code_norm.transpose(1, 2))
+    # torch.clamp 压缩张量
+    scores0 = scores0 / norm0.clamp(min=eps) * cfg.TRAIN.SMOOTH.GAMMA3
+
+    # --> batch_size x batch_size
+    scores0 = scores0.squeeze()
+    if class_ids is not None:
+        # masked_fill_表示的意思是：在原tensor中，mask中对应元素为1的位置都用num填充。带_代表修改自己本身
+        scores0.data.masked_fill_(masks, -float('inf'))
+    scores1 = scores0.transpose(0, 1)
+    if labels is not None:
+        loss0 = nn.CrossEntropyLoss()(scores0, labels)
+        loss1 = nn.CrossEntropyLoss()(scores1, labels)
+    else:
+        loss0, loss1 = None, None
+    return loss0, loss1
+
+
+def words_loss(img_features, words_emb, labels,
+               cap_lens, class_ids, batch_size):
+    """
+        words_emb(query): batch x nef x seq_len
+        img_features(context): batch x nef x 17 x 17
+    """
+    masks = []
+    att_maps = []
+    similarities = []
+    cap_lens = cap_lens.data.tolist()
+    for i in range(batch_size):
+        if class_ids is not None:
+            mask = (class_ids == class_ids[i]).astype(np.uint8)
+            mask[i] = 0
+            masks.append(mask.reshape((1, -1)))
+        # Get the i-th text description
+        words_num = cap_lens[i]
+        # -> 1 x nef x words_num
+        word = words_emb[i, :, :words_num].unsqueeze(0).contiguous()
+        # -> batch_size x nef x words_num
+        word = word.repeat(batch_size, 1, 1)
+        # batch x nef x 17*17
+        context = img_features
+        """
+            word(query): batch x nef x words_num
+            context: batch x nef x 17 x 17
+            weiContext: batch x nef x words_num
+            attn: batch x words_num x 17 x 17
+        """
+        weiContext, attn = func_attention(word, context, cfg.TRAIN.SMOOTH.GAMMA1)
+        att_maps.append(attn[i].unsqueeze(0).contiguous())
+        # --> batch_size x words_num x nef
+        word = word.transpose(1, 2).contiguous()
+        weiContext = weiContext.transpose(1, 2).contiguous()
+        # --> batch_size*words_num x nef
+        word = word.view(batch_size * words_num, -1)
+        weiContext = weiContext.view(batch_size * words_num, -1)
+        #
+        # -->batch_size*words_num
+        row_sim = cosine_similarity(word, weiContext)
+        # --> batch_size x words_num
+        row_sim = row_sim.view(batch_size, words_num)
+
+        # Eq. (10)
+        row_sim.mul_(cfg.TRAIN.SMOOTH.GAMMA2).exp_()
+        row_sim = row_sim.sum(dim=1, keepdim=True)
+        row_sim = torch.log(row_sim)
+
+        # --> 1 x batch_size
+        # similarities(i, j): the similarity between the i-th image and the j-th text description
+        similarities.append(row_sim)
+
+    # batch_size x batch_size
+    similarities = torch.cat(similarities, 1)
+    if class_ids is not None:
+        masks = np.concatenate(masks, 0)
+        # masks: batch_size x batch_size
+        # masks = torch.ByteTensor(masks)
+        masks = torch.BoolTensor(masks)
+
+        if cfg.CUDA:
+            masks = masks.cuda()
+
+    similarities = similarities * cfg.TRAIN.SMOOTH.GAMMA3
+    if class_ids is not None:
+        similarities.data.masked_fill_(masks, -float('inf'))
+    similarities1 = similarities.transpose(0, 1)
+    if labels is not None:
+        loss0 = nn.CrossEntropyLoss()(similarities, labels)
+        loss1 = nn.CrossEntropyLoss()(similarities1, labels)
+    else:
+        loss0, loss1 = None, None
+    return loss0, loss1, att_maps

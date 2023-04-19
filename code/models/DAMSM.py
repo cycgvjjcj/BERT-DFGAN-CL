@@ -92,7 +92,7 @@ class RNN_ENCODER(nn.Module):
         else:
             sent_emb = hidden.transpose(0, 1).contiguous()
         sent_emb = sent_emb.view(-1, self.nhidden * self.num_directions)
-        print("embedding_size:")
+        print("embedding_size:words_emb=")
         print(words_emb.size())
         print(sent_emb.size())
         return words_emb, sent_emb

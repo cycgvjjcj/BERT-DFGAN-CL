@@ -44,6 +44,7 @@ def prepare_models(args):
     # text_encoder = RNN_ENCODER(n_words, nhidden=args.TEXT.EMBEDDING_DIM)
     # state_dict = torch.load(args.TEXT.DAMSM_NAME, map_location='cpu')
     # text_encoder = load_model_weights(text_encoder, state_dict, multi_gpus=False)
+    #关键改造点
     text_encoder = myBertModel(embed = args.TEXT.EMBEDDING_DIM,words_num = args.TEXT.WORDS_NUM)
     state_dict = torch.load(args.TEXT.BERT_NAME, map_location='cpu')
     text_encoder.load_state_dict(state_dict,strict=False)
@@ -124,4 +125,5 @@ def prepare_dataloaders(args, transform=None):
             num_workers=num_workers, shuffle='True')
     return train_dataloader, valid_dataloader, \
             train_dataset, valid_dataset, train_sampler
+
 
